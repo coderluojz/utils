@@ -1,18 +1,21 @@
 {
-  "name": "@coderluojz/utils",
+  "name": "@luojz/utils",
   "version": "1.0.0",
   "description": "工具方法库",
-  "main": "./dist/index.js",
-  "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
+  "type": "module",
   "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.js"
+    "./utils": {
+      "import": "./dist/utils/index.js",
+      "require": "./dist/utils/index.cjs"
+    },
+    "./types": {
+      "import": "./dist/types/index.js",
+      "require": "./dist/types/index.cjs"
     }
   },
   "scripts": {
-    "build": "tsc",
+    "dev": "tsup --watch",
+    "build": "tsup",
     "prepublishOnly": "npm run build"
   },
   "repository": {
@@ -34,6 +37,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "axios": "^1.10.0"
+    "axios": "^1.10.0",
+    "tsup": "^8.5.0"
   }
 }

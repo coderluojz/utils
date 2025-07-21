@@ -1,102 +1,27 @@
 import axios from 'axios'
+import type { AxiosInstance, AxiosResponse } from 'axios'
 import type {
-  AxiosInstance,
-  AxiosResponse,
-  AxiosRequestConfig,
-  InternalAxiosRequestConfig,
-} from 'axios'
-
-export interface HttpClientOptions {
-  baseURL: string
-  handlers?: RequestHandlers
-  customInterceptors?: HttpClientInterceptors
-  axiosConfig?: RequestConfig
-}
-
-// 自定义扩展的 Axios 请求配置
-export interface CustomRequestConfig {
-  // 是否显示全局提示
-  showGlobalMessage?: boolean
-  // 自定义的成功状态码
-  successCode?: number
-}
-
-export type RequestConfig = AxiosRequestConfig & CustomRequestConfig
-
-export type InternalRequestConfig = InternalAxiosRequestConfig &
-  CustomRequestConfig
-
-// 响应数据的统一结构
-export interface ApiResponse<T = any> {
-  code: number
-  message: string
-  data: T
-}
-
-// 请求处理函数
-export interface RequestHandlers {
-  /**
-   * @description 请求前的 header 处理，如添加 token
-   * @param config
-   * @returns {InternalRequestConfig}
-   */
-  handleRequestHeader?: (config: InternalRequestConfig) => InternalRequestConfig
-
-  /**
-   * @description 全局消息提示
-   * @param message
-   */
-  handleGlobalMessage?: (message: string) => void
-
-  /**
-   * @description 后端返回的特殊 code 码处理，例如 token 失效、需要重新登录等
-   * @param code
-   * @param message
-   */
-  handleBackendError?: (code: number, message: string) => void
-}
-
-// 拦截器配置类型
-export interface HttpClientInterceptors {
-  /**
-   * 请求成功拦截器
-   * @param config 请求配置
-   * @returns 修改后的配置或一个返回配置的 Promise
-   */
-  requestOnFulfilled?: (
-    config: InternalRequestConfig
-  ) => InternalRequestConfig | Promise<InternalRequestConfig>
-
-  /**
-   * 请求失败拦截器
-   * @param error 错误对象
-   * @returns 一个被 reject 的 Promise
-   */
-  requestOnRejected?: (error: any) => any
-
-  /**
-   * 响应成功拦截器
-   * @param response 响应对象
-   * @returns 处理后的响应或一个返回响应的 Promise
-   */
-  responseOnFulfilled?: (response: AxiosResponse<ApiResponse>) => any // 返回 any，因为用户可能想直接返回 data
-
-  /**
-   * 响应失败拦截器
-   * @param error 错误对象
-   * @returns 一个被 reject 的 Promise
-   */
-  responseOnRejected?: (error: any) => any
-}
+  ApiResponse,
+  HttpClientInterceptors,
+  HttpClientOptions,
+  InternalRequestConfig,
+  RequestConfig,
+  RequestHandlers,
+  StreamRequestOptions,
+  StreamCallbacks,
+  StreamResponse,
+} from '../types/request'
 
 export class HttpClient {
   private readonly instance: AxiosInstance
   private readonly handlers: RequestHandlers
+  private readonly baseURL: string
 
   // 默认配置
   private static readonly defaultConfig: RequestConfig = {
     showGlobalMessage: true,
     successCode: 10000,
+    enableCodeCheck: true,
   }
 
   constructor({
@@ -105,6 +30,7 @@ export class HttpClient {
     customInterceptors = {},
     handlers = {},
   }: HttpClientOptions) {
+    this.baseURL = baseURL
     this.instance = axios.create({
       baseURL,
       timeout: 10000,
@@ -137,7 +63,9 @@ export class HttpClient {
     const config = response.config as RequestConfig
     const res = response.data
     // 检查业务成功码
-    const isSuccess = config?.successCode === res.code
+    const isSuccess = config?.enableCodeCheck
+      ? config?.successCode === res.code
+      : true
 
     if (!isSuccess) {
       // 处理业务错误
@@ -152,7 +80,7 @@ export class HttpClient {
       return Promise.reject(res)
     }
 
-    return res.data
+    return res
   }
   // 响应拦截器——失败
   private responseOnRejected(error: any): any {
@@ -241,6 +169,108 @@ export class HttpClient {
   ): Promise<T> {
     return this.request<T>({ ...config, url, method: 'DELETE', params })
   }
+
+  /**
+   * 发起流式请求
+   */
+  public async stream(
+    options: StreamRequestOptions,
+    callbacks: StreamCallbacks = {}
+  ): Promise<StreamResponse> {
+    const {
+      url,
+      baseURL = this.baseURL,
+      method = 'POST',
+      headers = {},
+      body,
+      signal,
+      extractContent,
+    } = options
+    const { onMessage, onError, onComplete, onStart } = callbacks
+
+    const controller = new AbortController()
+    const requestSignal = signal || controller.signal
+
+    let fullText = ''
+
+    try {
+      onStart?.()
+
+      const response = await fetch(`${baseURL}${url}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          ...headers,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: requestSignal,
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('Response body is not readable')
+      }
+
+      const decoder = new TextDecoder()
+
+      while (true) {
+        const { done, value } = await reader.read()
+
+        if (done) {
+          break
+        }
+
+        const chunk = decoder.decode(value, { stream: true })
+
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (line.trim() === '') continue
+
+          // 处理 SSE 格式
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim()
+
+            // 检查是否是结束标志
+            if (data === '[DONE]') {
+              onComplete?.(fullText)
+              return { fullText, abort: () => controller.abort() }
+            }
+
+            try {
+              // 尝试解析 JSON 格式的数据
+              const parsed = JSON.parse(data)
+              const content = extractContent?.(parsed) || parsed
+              if (content) {
+                fullText += content
+                onMessage?.(content, fullText)
+              }
+            } catch {
+              // 如果不是 JSON，直接作为文本处理
+              fullText += data
+              onMessage?.(data, fullText)
+            }
+          } else {
+            // 处理普通流式文本
+            fullText += line
+            onMessage?.(line, fullText)
+          }
+        }
+      }
+
+      onComplete?.(fullText)
+      return { fullText, abort: () => controller.abort() }
+    } catch (error) {
+      const err = error as Error
+      onError?.(err)
+      throw err
+    }
+  }
 }
 
 // 使用示例
@@ -295,33 +325,25 @@ export class HttpClient {
 // 	{ id: 1 },
 // 	{ showGlobalMessage: false },
 // )
-// const requestInstance = new HttpClient({
-// 	baseURL: 'xxxx',
-// 	handlers: {
-// 		handleRequestHeader: config => {
-// 			config?.headers.Authorization = 'Bearer token'
-// 			return config
+
+// requestInstance.stream(
+// 	{
+// 		url: 'xxxx',
+// 		method: 'POST',
+// 		body: {...},
+// 	},
+// 	{
+// 		onStart: () => {
+// 			console.log('开始接收流式数据...\n')
 // 		},
-// 		handleGlobalMessage: message => {
-// 			console.log('全局提示:', message)
+// 		onMessage: (chunk, fullText) => {
+// 			console.log(`流式数据: ${fullText}`)
 // 		},
-// 		handleBackendError: (code, message) => {
-// 			console.log('后端错误:', code, message)
+// 		onComplete: fullText => {
+// 			console.log(`最终内容: ${fullText}`)
+// 		},
+// 		onError: err => {
+// 			console.log('err: ', err);
 // 		},
 // 	},
-// 	customInterceptors: {
-// 		requestOnFulfilled: config => {
-// 			console.log('请求拦截器:', config)
-// 			return config
-// 		},
-// 		responseOnFulfilled: response => {
-// 			console.log('响应拦截器:', response)
-// 			return response
-// 		},
-// 	},
-// 	axiosConfig: {
-// 		timeout: 1000 * 60,
-// 		showGlobalMessage: true,
-// 		successCode: 200,
-// 	},
-// })
+// )
